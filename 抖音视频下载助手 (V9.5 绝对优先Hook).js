@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name 抖音视频下载助手 (V9.3 性能优化)
+// @name 抖音视频下载助手 (V9.5 严格 ID 去重与 URL 合并)
 // @namespace http://tampermonkey.net/
-// @version 9.3
-// @description 核心升级：优化了面板拖动时的性能，将位置更新从 left/top 切换到 CSS transform，启用硬件加速，减少卡顿。
+// @version 9.5
+// @description 核心升级：修复了相同视频ID重复出现在列表的问题。现在以视频ID为唯一键，优先保留API捕获的高质量下载链接。
 // @author Gemini, thehappymouse@gmail.com
 // @match https://www.douyin.com/*
 // @grant GM_download
@@ -87,73 +87,54 @@
         return originalOpen.apply(this, arguments);
     };
 
-    // --- 样式 (V9.3 更新：添加 transform 优化) ---
+
+    // --- 样式 (V9.5 沿用 V9.4 的紫色主题和性能优化相关样式) ---
     const css = `
         #dy-sniffer-panel {
-            /* V9.3 核心：改为固定位置，使用 transform 移动 */
-            position: fixed;
-            right: 20px;
-            top: 80px;
-            width: 340px;
-            max-height: 85vh;
-            /* 确保初始位置是固定的 */
-            transform: translate(0, 0);
-            will-change: transform; /* 浏览器提示：将要修改 transform 属性，提前进行优化 */
-
-            background: rgba(22, 24, 35, 0.95);
-            border: 1px solid rgba(255,255,255,0.1);
-            border-radius: 10px;
-            z-index: 2147483647;
-            color: #fff;
-            display: flex;
-            flex-direction: column;
-            font-family: sans-serif;
-            box-shadow: 0 8px 20px rgba(0,0,0,0.6);
-            backdrop-filter: blur(10px);
-            cursor: grab;
-            transition: all 0.3s ease-in-out;
+            position: fixed; right: 20px; top: 80px; width: 340px; max-height: 85vh;
+            transform: translate(0, 0); will-change: transform;
+            background: rgba(74, 48, 89, 0.95);
+            border: 1px solid rgba(255,255,255,0.2);
+            border-radius: 10px; z-index: 2147483647; color: #fff; display: flex; flex-direction: column;
+            font-family: sans-serif; box-shadow: 0 8px 20px rgba(0,0,0,0.6); backdrop-filter: blur(10px);
+            cursor: grab; transition: all 0.3s ease-in-out;
         }
         #dy-sniffer-panel.dragging { cursor: grabbing; }
         #dy-sniffer-header {
-            padding: 15px; border-bottom: 1px solid rgba(255,255,255,0.1); font-weight: bold;
-            display: flex; justify-content: space-between; align-items: center; background: rgba(255,255,255,0.05);
+            padding: 15px; border-bottom: 1px solid rgba(255,255,255,0.2); font-weight: bold;
+            display: flex; justify-content: space-between; align-items: center; background: rgba(255,255,255,0.08);
             cursor: move;
         }
-        .dy-clear-btn { font-size:12px; color:#bbb; cursor:pointer; text-decoration:underline; margin-right:10px;}
+        .dy-clear-btn { font-size:12px; color:#ddd; cursor:pointer; text-decoration:underline; margin-right:10px;}
         .dy-close-btn { cursor:pointer; font-size:18px; line-height: 1; user-select: none; margin-left: 5px; }
         #dy-sniffer-content { overflow-y: auto; flex: 1; padding: 10px; scroll-behavior: smooth; cursor: default;}
 
-        /* 折叠后的悬浮按钮样式 */
         #dy-restore-btn {
             position: fixed; right: 20px; top: 80px; width: 80px; height: 35px;
-            background: #9b59b6;
-            color: white; border: none; border-radius: 5px;
-            z-index: 2147483647; cursor: pointer;
-            font-size: 14px; font-weight: bold;
-            display: none;
-            align-items: center; justify-content: center;
-            box-shadow: 0 4px 10px rgba(0,0,0,0.4);
-            transition: all 0.3s ease-in-out;
+            background: #9b59b6; color: white; border: none; border-radius: 5px;
+            z-index: 2147483647; cursor: pointer; font-size: 14px; font-weight: bold;
+            display: none; align-items: center; justify-content: center;
+            box-shadow: 0 4px 10px rgba(0,0,0,0.4); transition: all 0.3s ease-in-out;
         }
         #dy-restore-btn:hover { background: #8e44ad; }
 
         .dy-item {
-            background: rgba(255,255,255,0.08); margin-bottom: 10px; padding: 10px;
+            background: rgba(255,255,255,0.15); margin-bottom: 10px; padding: 10px;
             border-radius: 8px; display: flex; gap: 10px; transition: all 0.3s; border: 2px solid transparent;
             cursor: default;
         }
         .dy-item.playing {
-            background: rgba(37, 192, 170, 0.15); border-color: #25c0aa; order: -1;
+            background: rgba(37, 192, 170, 0.25); border-color: #25c0aa; order: -1;
         }
         .dy-cover-img { width: 60px; height: 80px; object-fit: cover; border-radius: 4px; background: #000; flex-shrink: 0; }
         .dy-info { flex: 1; display: flex; flex-direction: column; justify-content: space-between; overflow: hidden; }
         .dy-item-title {
             font-size: 12px; line-height: 1.4; max-height: 2.8em; overflow: hidden;
             text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
-            color: #eee; margin-bottom: 3px;
+            color: #fff; margin-bottom: 3px;
         }
         .dy-item-id {
-            font-size: 10px; color: #999; margin-bottom: 5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+            font-size: 10px; color: #ccc; margin-bottom: 5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
         }
         .dy-btn-group { display: flex; gap: 5px; }
         .dy-action-btn {
@@ -171,9 +152,8 @@
     `;
 
     // --- 2. 核心引擎 C: ID 匹配、高亮、滚动 (保持不变) ---
-    // ... (代码保持 V9.2 不变) ...
+    // ... (代码保持 V9.4 逻辑不变) ...
     function startDOMVideoURLSniffer() {
-        // ... (保持 V9.2 逻辑不变) ...
         setInterval(() => {
             const currentId = extractCurrentVideoId();
             const currentTitle = extractCurrentVideoTitle();
@@ -181,31 +161,22 @@
             document.querySelectorAll('video').forEach(videoEl => {
                 const url = videoEl.src;
                 if (!url) return;
-
                 const cleanUrl = cleanAndNormalizeUrl(url);
                 if (!cleanUrl) return;
 
                 if (CDN_KEYWORDS.some(k => url.includes(k))) {
-                    if (!state.urls.has(cleanUrl)) {
-                        console.log(`[抖音助手] DOM 嗅探到可下载 URL: ${cleanUrl}`);
-
-                        addVideoToUI({
-                            url: url,
-                            title: currentTitle,
-                            id: currentId,
-                            cover: null,
-                            source: 'DOM'
-                        });
-
-                        state.urls.add(cleanUrl);
-                    }
+                    // V9.5: 不再检查 state.urls.has(cleanUrl)，让 addVideoToUI() 决定是否合并
+                    addVideoToUI({
+                        url: url, title: currentTitle,
+                        id: currentId, cover: null, source: 'DOM'
+                    });
                 }
             });
         }, 500);
     }
 
     function startTitleAndIDExtractor() {
-        // ... (保持 V9.2 逻辑不变) ...
+        // ... (保持 V9.4 逻辑不变) ...
         setInterval(() => {
             const currentId = extractCurrentVideoId();
             let matchedElement = null;
@@ -216,14 +187,11 @@
 
                     if (isPlaying) {
                         matchedElement = item.el;
-
                         if (!item.el.classList.contains('playing')) {
                             document.querySelectorAll('.dy-item.playing').forEach(el => el.classList.remove('playing'));
                             item.el.classList.add('playing');
                         }
-
                         item.el.querySelector('.dy-item-id').innerText = `ID: ${currentId}`;
-
                     } else {
                         item.el.classList.remove('playing');
                     }
@@ -272,61 +240,23 @@
 
     // --- 3. UI, 下载与初始化 ---
 
-    // ... forceDownload, handleError (保持不变)
-
-    function forceDownload(url, filename, btn) {
-        // ... (保持 V9.2 逻辑不变)
-        if (btn.classList.contains('dy-btn-disabled')) return;
-        btn.innerText = "0%"; btn.classList.add('dy-btn-disabled');
-        GM_xmlhttpRequest({
-            method: "GET", url: url, responseType: "blob",
-            headers: { "Referer": "https://www.douyin.com/", "User-Agent": navigator.userAgent },
-            onprogress: (p) => { if(p.total>0) btn.innerText = Math.round((p.loaded/p.total)*100) + "%"; },
-            onload: (r) => {
-                if (r.status === 200) {
-                    const u = window.URL.createObjectURL(r.response);
-                    const a = document.createElement('a'); a.href = u; a.download = filename;
-                    document.body.appendChild(a); a.click(); document.body.removeChild(a);
-                    window.URL.revokeObjectURL(u);
-                    btn.innerText = "完成";
-                    setTimeout(() => { btn.innerText = "下载"; btn.classList.remove('dy-btn-disabled'); }, 2000);
-                } else { handleError(btn); }
-            },
-            onerror: () => handleError(btn)
-        });
-    }
-
-    function handleError(btn) {
-        // ... (保持 V9.2 逻辑不变)
-        btn.innerText = "失败"; btn.style.background = "#555";
-        alert("下载失败！请复制链接到浏览器新窗口打开，或尝试刷新页面。");
-        setTimeout(() => { btn.innerText = "下载"; btn.classList.remove('dy-btn-disabled'); btn.style.background = "#fe2c55"; }, 3000);
-    }
-
-    // V9.3 核心优化：使用 transform 实现拖动
+    // V9.4 makeDraggable (rAF 优化) 保持不变
     function makeDraggable(element, handle) {
         let isDragging = false;
         let startX = 0;
         let startY = 0;
-        let translateX = 0; // 记录当前的 X 偏移量
-        let translateY = 0; // 记录当前的 Y 偏移量
-        let initialRight = 20; // 初始 CSS right 值
-        let initialTop = 80;   // 初始 CSS top 值
+        let translateX = 0;
+        let translateY = 0;
+        let rAFId = null;
 
-        // 获取当前 transform 值的辅助函数
         function getTransformValues() {
             const style = window.getComputedStyle(element);
             const matrix = style.transform;
-            if (matrix === 'none') {
-                return { x: 0, y: 0 };
-            }
-            // 提取 translate(x, y) 中的 x 和 y
+            if (matrix === 'none') return { x: 0, y: 0 };
             const match = matrix.match(/matrix.*\((.+)\)/);
             if (match) {
                 const values = match[1].split(', ').map(v => parseFloat(v));
-                if (values.length === 6) {
-                    return { x: values[4], y: values[5] };
-                }
+                if (values.length === 6) return { x: values[4], y: values[5] };
             }
             return { x: 0, y: 0 };
         }
@@ -334,45 +264,42 @@
         handle.addEventListener('mousedown', (e) => {
             isDragging = true;
             element.classList.add('dragging');
-
-            // 1. 获取当前偏移量
             const currentTransform = getTransformValues();
             translateX = currentTransform.x;
             translateY = currentTransform.y;
-
-            // 2. 记录鼠标点击的起始位置
             startX = e.clientX;
             startY = e.clientY;
-
             e.preventDefault();
         });
 
-        document.addEventListener('mousemove', (e) => {
-            if (!isDragging) return;
+        const updatePosition = () => {
+            element.style.transform = `translate(${translateX}px, ${translateY}px)`;
+            rAFId = null;
+        };
 
-            // 3. 计算鼠标位移
+        const onMouseMove = (e) => {
+            if (!isDragging) return;
             const deltaX = e.clientX - startX;
             const deltaY = e.clientY - startY;
-
-            // 4. 计算新的 transform 偏移量
-            const newTranslateX = translateX + deltaX;
-            const newTranslateY = translateY + deltaY;
-
-            // 5. 应用 transform (启用硬件加速，性能更高)
-            element.style.transform = `translate(${newTranslateX}px, ${newTranslateY}px)`;
-
-            // 6. 实时更新起始点，以实现平滑拖动
+            translateX += deltaX;
+            translateY += deltaY;
             startX = e.clientX;
             startY = e.clientY;
-            translateX = newTranslateX;
-            translateY = newTranslateY;
-        });
+            if (rAFId === null) {
+                rAFId = requestAnimationFrame(updatePosition);
+            }
+        };
+
+        document.addEventListener('mousemove', onMouseMove);
 
         document.addEventListener('mouseup', () => {
             if (isDragging) {
                 isDragging = false;
                 element.classList.remove('dragging');
-                // 可选：在这里可以存储最终位置，以便下次加载时恢复
+                if (rAFId !== null) {
+                    cancelAnimationFrame(rAFId);
+                    rAFId = null;
+                }
             }
         });
     }
@@ -393,9 +320,9 @@
     }
 
     function createUI() {
+        // ... (保持 V9.4 逻辑不变) ...
         GM_addStyle(css);
 
-        // 1. 主面板
         const panel = document.createElement('div');
         panel.id = 'dy-sniffer-panel';
         panel.innerHTML = `
@@ -410,79 +337,104 @@
         `;
         document.body.appendChild(panel);
 
-        // 2. 还原按钮 (折叠后显示的悬浮按钮)
         const restoreBtn = document.createElement('button');
         restoreBtn.id = 'dy-restore-btn';
         restoreBtn.innerHTML = '&#8644; 还原';
         document.body.appendChild(restoreBtn);
 
-
-        // --- 绑定事件 ---
-
         document.getElementById('dy-clear').onclick = () => {
             document.getElementById('dy-sniffer-content').innerHTML = '';
             state.items = []; state.urls.clear(); document.getElementById('dy-count').innerText = '0';
         };
-
-        // V9.2: X 按钮现在是折叠
         document.getElementById('dy-toggle-collapse').onclick = toggleCollapse;
-
-        // V9.2: 还原按钮点击
         restoreBtn.onclick = toggleCollapse;
 
         makeDraggable(panel, document.getElementById('dy-sniffer-header'));
     }
 
+    // V9.5 核心去重和合并逻辑
     function addVideoToUI(meta) {
-        // ... (保持 V9.2 逻辑不变) ...
         const cleanUrl = cleanAndNormalizeUrl(meta.url);
         if (!cleanUrl) return;
 
-        let existingItem = state.items.find(item => item.cleanUrl === cleanUrl);
-        const idDisplay = meta.id ? `ID: ${meta.id}` : 'ID: 未捕获';
         const videoId = meta.id || extractCurrentVideoId();
+        const idDisplay = videoId ? `ID: ${videoId}` : 'ID: 未捕获';
 
+        // 1. 尝试通过 ID 查找现有项 (V9.5 优先查找 ID)
+        let existingItem = videoId ? state.items.find(item => item.id === videoId) : null;
+
+        // 2. 如果通过 ID 找到了，则尝试更新/替换 URL
         if (existingItem) {
-            // ... (省略去重和更新逻辑，与V9.2相同)
+            let shouldUpdateUrl = false;
+
+            // 策略：API 链接总是优先于其他链接
+            if (meta.source === 'API' && existingItem.source !== 'API') {
+                 shouldUpdateUrl = true;
+            }
+            // 策略：如果都是 DOM/NET 来源，使用第一个捕获到的链接（以 cleanUrl 为准）
+            else if (existingItem.cleanUrl === cleanUrl) {
+                // 如果是相同的 cleanUrl，仅更新非URL信息 (标题/封面)
+            } else {
+                // 如果 ID 相同但 cleanUrl 不同，并且新来源不是 API 且老来源是 API，则忽略新链接
+                if (existingItem.source === 'API' && meta.source !== 'API') {
+                    return;
+                }
+                // 如果 ID 相同但 cleanUrl 不同，且新来源更优（API），则替换
+                if (meta.source === 'API') {
+                    shouldUpdateUrl = true;
+                }
+            }
+
+            // --- 执行更新 ---
             let isUpdated = false;
 
-            const isBetterSource = (meta.source === 'API' && existingItem.source !== 'API') ||
-                                   (meta.source === 'DOM' && existingItem.source === 'NET');
+            if (shouldUpdateUrl) {
+                // 替换 URL
+                existingItem.url = meta.url;
+                existingItem.cleanUrl = cleanUrl;
+                existingItem.source = meta.source;
+                console.log(`[抖音助手] ID ${videoId} URL 已替换为 ${meta.source} 高质量链接。`);
+                isUpdated = true;
+            }
 
-            if (isBetterSource || existingItem.id === null) {
+            // 更新标题/封面
+            if (meta.title && meta.title.length > existingItem.el.dataset.title.length) {
+                existingItem.el.dataset.title = meta.title;
+                isUpdated = true;
+            }
+            if (meta.cover && existingItem.cover === null) {
+                existingItem.cover = meta.cover;
+                existingItem.el.querySelector('.dy-cover-img').src = meta.cover;
+                isUpdated = true;
+            }
 
-                if (meta.id && existingItem.id === null) {
-                    existingItem.id = meta.id;
-                    existingItem.el.querySelector('.dy-item-id').innerText = idDisplay;
-                    isUpdated = true;
-                }
+            if (isUpdated || shouldUpdateUrl) {
+                // 刷新 UI 标记和信息
+                const sourceColor = existingItem.source === 'API' ? '#587edb' : (existingItem.source === 'DOM' ? '#e68e20' : '#333');
+                existingItem.el.querySelector('.tag-api').innerText = existingItem.source;
+                existingItem.el.querySelector('.tag-api').style.background = sourceColor;
+                existingItem.el.querySelector('.dy-item-title').innerHTML =
+                    `<span class="dy-tag tag-playing">播放中</span><span class="dy-tag tag-api" style="background:${sourceColor};">${existingItem.source}</span> ${existingItem.el.dataset.title}`;
+            }
 
-                if (meta.cover && existingItem.cover === null) {
-                    existingItem.cover = meta.cover;
-                    existingItem.el.querySelector('.dy-cover-img').src = meta.cover;
-                    isUpdated = true;
-                }
+            // ID 匹配的视频已处理，直接返回
+            return;
+        }
 
-                if (isBetterSource) {
-                     existingItem.source = meta.source;
-                     const sourceColor = meta.source === 'API' ? '#587edb' : (meta.source === 'DOM' ? '#e68e20' : '#333');
-                     existingItem.el.querySelector('.tag-api').innerText = meta.source;
-                     existingItem.el.querySelector('.tag-api').style.background = sourceColor;
-                     isUpdated = true;
-                }
-
-                if (meta.title && meta.title.length > existingItem.el.dataset.title.length) {
-                    existingItem.el.dataset.title = meta.title;
-                    const sourceColor = existingItem.source === 'API' ? '#587edb' : (existingItem.source === 'DOM' ? '#e68e20' : '#333');
-                    existingItem.el.querySelector('.dy-item-title').innerHTML =
-                            `<span class="dy-tag tag-playing">播放中</span><span class="dy-tag tag-api" style="background:${sourceColor};">${existingItem.source}</span> ${meta.title}`;
-                    isUpdated = true;
-                }
+        // 3. 如果 ID 缺失，则使用 URL 查找（回退到 V9.4 逻辑）
+        existingItem = state.items.find(item => item.cleanUrl === cleanUrl);
+        if (existingItem) {
+            // 确保没有 ID 的项目，如果新数据有 ID，则更新 ID 并走 2 的流程
+            if (videoId && existingItem.id === null) {
+                existingItem.id = videoId;
+                existingItem.el.querySelector('.dy-item-id').innerText = idDisplay;
+                // 找到 ID 后，理论上 shouldUpdateUrl 也会被触发，但为了简化，这里不再深度检查，仅更新 ID 即可。
             }
             return;
         }
 
-        // --- 创建新列表项 ---
+
+        // 4. 创建新列表项
 
         const container = document.getElementById('dy-sniffer-content');
         if (container && container.innerText.includes("正在监听")) container.innerHTML = '';
@@ -509,7 +461,7 @@
                 </div>
                 <div class="dy-item-id">${idDisplay}</div>
                 <div class="dy-btn-group">
-                    <button class="dy-action-btn dy-btn-jump dy-btn-disabled">跳转</button>
+                    <button class="dy-action-btn dy-btn-jump ${videoId ? '' : 'dy-btn-disabled'}">${videoId ? '跳转' : 'ID缺失'}</button>
                     <button class="dy-action-btn dy-btn-down">下载</button>
                 </div>
             </div>
@@ -517,14 +469,11 @@
 
         const jumpBtn = itemEl.querySelector('.dy-btn-jump');
         if (videoId) {
-            jumpBtn.classList.remove('dy-btn-disabled');
-            jumpBtn.innerText = "跳转";
             jumpBtn.onclick = () => { window.open(`https://www.douyin.com/video/${videoId}`, '_blank'); };
-        } else {
-             jumpBtn.innerText = "ID缺失";
         }
 
         const downBtn = itemEl.querySelector('.dy-btn-down');
+        // V9.5 确保下载按钮使用当前 meta.url
         downBtn.onclick = () => forceDownload(meta.url, safeTitle + '.mp4', downBtn);
 
         container.appendChild(itemEl);
@@ -549,9 +498,6 @@
 
     // 真正的初始化函数
     function init() {
-        // Hook 逻辑已在顶层
-
-        // 使用 MutationObserver 确保在 body 元素出现时立即启动 UI 和核心逻辑
         if (document.body) {
             startCoreServices();
         } else {
@@ -563,6 +509,34 @@
             });
             observer.observe(document.documentElement, { childList: true });
         }
+    }
+
+    // 下载逻辑 (保持 V9.4 不变)
+    function forceDownload(url, filename, btn) {
+        if (btn.classList.contains('dy-btn-disabled')) return;
+        btn.innerText = "0%"; btn.classList.add('dy-btn-disabled');
+        GM_xmlhttpRequest({
+            method: "GET", url: url, responseType: "blob",
+            headers: { "Referer": "https://www.douyin.com/", "User-Agent": navigator.userAgent },
+            onprogress: (p) => { if(p.total>0) btn.innerText = Math.round((p.loaded/p.total)*100) + "%"; },
+            onload: (r) => {
+                if (r.status === 200) {
+                    const u = window.URL.createObjectURL(r.response);
+                    const a = document.createElement('a'); a.href = u; a.download = filename;
+                    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+                    window.URL.revokeObjectURL(u);
+                    btn.innerText = "完成";
+                    setTimeout(() => { btn.innerText = "下载"; btn.classList.remove('dy-btn-disabled'); }, 2000);
+                } else { handleError(btn); }
+            },
+            onerror: () => handleError(btn)
+        });
+    }
+
+    function handleError(btn) {
+        btn.innerText = "失败"; btn.style.background = "#555";
+        alert("下载失败！请复制链接到浏览器新窗口打开，或尝试刷新页面。");
+        setTimeout(() => { btn.innerText = "下载"; btn.classList.remove('dy-btn-disabled'); btn.style.background = "#fe2c55"; }, 3000);
     }
 
     init();
