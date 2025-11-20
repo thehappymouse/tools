@@ -1,9 +1,6 @@
 # tools
-some common use class and function by work
+一些工具脚本都往这里放吧，不定期更新整理
 ## class list
 ## function list 
-* date_only   ```return only date,for example: 2017-12-12```
-* date_time   ```parse_apk_version_namereturn a date fromat string, like 2016-17-12 12:00:00```
-* video_info  ```use ffmpeg/ffprobe，get the duration and resolution info of video files```
-* parse_apk_version_name ```use aapt, get the apk files -> version_name``` 
-* random_mac ```make mac ```
+* 篡改猴 抖音视频下载  针对：此类链接： https://www.douyin.com/video/7571278458584648960   （右键视频，进入视频详情，支持下载）
+
