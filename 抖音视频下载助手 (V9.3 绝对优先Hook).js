@@ -1,10 +1,9 @@
 // ==UserScript==
-// @name 抖音视频下载助手 (V9.0 绝对优先Hook)
+// @name 抖音视频下载助手 (V9.3 性能优化)
 // @namespace http://tampermonkey.net/
-// @version 9.0
-// @description 核心升级：将所有 XMLHttpRequest 和 JSON.parse 的 Hook 逻辑提到脚本的顶层作用域立即执行，确保 Hook 发生在网站的任何网络请求之前。
-// @author Gemini
-// @author thehappymouse@gmail.com
+// @version 9.3
+// @description 核心升级：优化了面板拖动时的性能，将位置更新从 left/top 切换到 CSS transform，启用硬件加速，减少卡顿。
+// @author Gemini, thehappymouse@gmail.com
 // @match https://www.douyin.com/*
 // @grant GM_download
 // @grant GM_setClipboard
@@ -23,7 +22,9 @@
     const state = {
         urls: new Set(),
         items: [],
-        currentPlayingId: null
+        currentPlayingId: null,
+        isPanelVisible: true,
+        isPanelCollapsed: false
     };
 
     // --- 工具函数：URL 清理与去重核心 ---
@@ -40,9 +41,7 @@
         }
     }
 
-    // --- 1. 核心引擎 A/B: API & 网络流嗅探 (提到顶层作用域) ---
-
-    // ** 确保这是脚本执行时立即运行的第一批代码 **
+    // --- 1. 核心引擎 A/B: API & 网络流嗅探 (保持不变) ---
 
     function scanObjectForVideo(obj) {
         if (!obj || typeof obj !== 'object') return;
@@ -88,14 +87,31 @@
         return originalOpen.apply(this, arguments);
     };
 
-    // --- 样式 (保持不变) ---
+    // --- 样式 (V9.3 更新：添加 transform 优化) ---
     const css = `
         #dy-sniffer-panel {
-            position: fixed; right: 20px; top: 80px; width: 340px; max-height: 85vh;
-            background: rgba(22, 24, 35, 0.95); border: 1px solid rgba(255,255,255,0.1);
-            border-radius: 10px; z-index: 2147483647; color: #fff; display: flex; flex-direction: column;
-            font-family: sans-serif; box-shadow: 0 8px 20px rgba(0,0,0,0.6); backdrop-filter: blur(10px);
+            /* V9.3 核心：改为固定位置，使用 transform 移动 */
+            position: fixed;
+            right: 20px;
+            top: 80px;
+            width: 340px;
+            max-height: 85vh;
+            /* 确保初始位置是固定的 */
+            transform: translate(0, 0);
+            will-change: transform; /* 浏览器提示：将要修改 transform 属性，提前进行优化 */
+
+            background: rgba(22, 24, 35, 0.95);
+            border: 1px solid rgba(255,255,255,0.1);
+            border-radius: 10px;
+            z-index: 2147483647;
+            color: #fff;
+            display: flex;
+            flex-direction: column;
+            font-family: sans-serif;
+            box-shadow: 0 8px 20px rgba(0,0,0,0.6);
+            backdrop-filter: blur(10px);
             cursor: grab;
+            transition: all 0.3s ease-in-out;
         }
         #dy-sniffer-panel.dragging { cursor: grabbing; }
         #dy-sniffer-header {
@@ -104,15 +120,30 @@
             cursor: move;
         }
         .dy-clear-btn { font-size:12px; color:#bbb; cursor:pointer; text-decoration:underline; margin-right:10px;}
+        .dy-close-btn { cursor:pointer; font-size:18px; line-height: 1; user-select: none; margin-left: 5px; }
         #dy-sniffer-content { overflow-y: auto; flex: 1; padding: 10px; scroll-behavior: smooth; cursor: default;}
+
+        /* 折叠后的悬浮按钮样式 */
+        #dy-restore-btn {
+            position: fixed; right: 20px; top: 80px; width: 80px; height: 35px;
+            background: #9b59b6;
+            color: white; border: none; border-radius: 5px;
+            z-index: 2147483647; cursor: pointer;
+            font-size: 14px; font-weight: bold;
+            display: none;
+            align-items: center; justify-content: center;
+            box-shadow: 0 4px 10px rgba(0,0,0,0.4);
+            transition: all 0.3s ease-in-out;
+        }
+        #dy-restore-btn:hover { background: #8e44ad; }
+
         .dy-item {
             background: rgba(255,255,255,0.08); margin-bottom: 10px; padding: 10px;
             border-radius: 8px; display: flex; gap: 10px; transition: all 0.3s; border: 2px solid transparent;
             cursor: default;
         }
         .dy-item.playing {
-            background: rgba(37, 192, 170, 0.15); border-color: #25c0aa;
-            order: -1;
+            background: rgba(37, 192, 170, 0.15); border-color: #25c0aa; order: -1;
         }
         .dy-cover-img { width: 60px; height: 80px; object-fit: cover; border-radius: 4px; background: #000; flex-shrink: 0; }
         .dy-info { flex: 1; display: flex; flex-direction: column; justify-content: space-between; overflow: hidden; }
@@ -129,7 +160,7 @@
             flex: 1; padding: 5px 0; border: none; border-radius: 4px; cursor: pointer;
             color: white; font-size: 11px; transition: opacity 0.2s;
         }
-        .dy-btn-copy { background: #3a3f50; }
+        .dy-btn-jump { background: #3a3f50; }
         .dy-btn-down { background: #fe2c55; }
         .dy-action-btn:hover { opacity: 0.8; }
         .dy-btn-disabled { opacity: 0.5; cursor: not-allowed; background: #555; }
@@ -139,9 +170,10 @@
         .dy-item.playing .dy-tag.tag-playing { display: inline-block; }
     `;
 
-    // --- 2. 核心引擎 C: ID 匹配、高亮、滚动 ---
-
+    // --- 2. 核心引擎 C: ID 匹配、高亮、滚动 (保持不变) ---
+    // ... (代码保持 V9.2 不变) ...
     function startDOMVideoURLSniffer() {
+        // ... (保持 V9.2 逻辑不变) ...
         setInterval(() => {
             const currentId = extractCurrentVideoId();
             const currentTitle = extractCurrentVideoTitle();
@@ -173,6 +205,7 @@
     }
 
     function startTitleAndIDExtractor() {
+        // ... (保持 V9.2 逻辑不变) ...
         setInterval(() => {
             const currentId = extractCurrentVideoId();
             let matchedElement = null;
@@ -239,7 +272,10 @@
 
     // --- 3. UI, 下载与初始化 ---
 
+    // ... forceDownload, handleError (保持不变)
+
     function forceDownload(url, filename, btn) {
+        // ... (保持 V9.2 逻辑不变)
         if (btn.classList.contains('dy-btn-disabled')) return;
         btn.innerText = "0%"; btn.classList.add('dy-btn-disabled');
         GM_xmlhttpRequest({
@@ -261,73 +297,153 @@
     }
 
     function handleError(btn) {
+        // ... (保持 V9.2 逻辑不变)
         btn.innerText = "失败"; btn.style.background = "#555";
         alert("下载失败！请复制链接到浏览器新窗口打开，或尝试刷新页面。");
         setTimeout(() => { btn.innerText = "下载"; btn.classList.remove('dy-btn-disabled'); btn.style.background = "#fe2c55"; }, 3000);
     }
 
+    // V9.3 核心优化：使用 transform 实现拖动
     function makeDraggable(element, handle) {
         let isDragging = false;
-        let offset = { x: 0, y: 0 };
+        let startX = 0;
+        let startY = 0;
+        let translateX = 0; // 记录当前的 X 偏移量
+        let translateY = 0; // 记录当前的 Y 偏移量
+        let initialRight = 20; // 初始 CSS right 值
+        let initialTop = 80;   // 初始 CSS top 值
+
+        // 获取当前 transform 值的辅助函数
+        function getTransformValues() {
+            const style = window.getComputedStyle(element);
+            const matrix = style.transform;
+            if (matrix === 'none') {
+                return { x: 0, y: 0 };
+            }
+            // 提取 translate(x, y) 中的 x 和 y
+            const match = matrix.match(/matrix.*\((.+)\)/);
+            if (match) {
+                const values = match[1].split(', ').map(v => parseFloat(v));
+                if (values.length === 6) {
+                    return { x: values[4], y: values[5] };
+                }
+            }
+            return { x: 0, y: 0 };
+        }
 
         handle.addEventListener('mousedown', (e) => {
             isDragging = true;
             element.classList.add('dragging');
-            offset.x = e.clientX - element.offsetLeft;
-            offset.y = e.clientY - element.offsetTop;
+
+            // 1. 获取当前偏移量
+            const currentTransform = getTransformValues();
+            translateX = currentTransform.x;
+            translateY = currentTransform.y;
+
+            // 2. 记录鼠标点击的起始位置
+            startX = e.clientX;
+            startY = e.clientY;
+
             e.preventDefault();
         });
 
         document.addEventListener('mousemove', (e) => {
             if (!isDragging) return;
-            let newX = e.clientX - offset.x;
-            let newY = e.clientY - offset.y;
 
-            newX = Math.max(0, Math.min(newX, window.innerWidth - element.offsetWidth));
-            newY = Math.max(0, Math.min(newY, window.innerHeight - element.offsetHeight));
+            // 3. 计算鼠标位移
+            const deltaX = e.clientX - startX;
+            const deltaY = e.clientY - startY;
 
-            element.style.left = newX + 'px';
-            element.style.top = newY + 'px';
-            element.style.right = 'unset';
+            // 4. 计算新的 transform 偏移量
+            const newTranslateX = translateX + deltaX;
+            const newTranslateY = translateY + deltaY;
+
+            // 5. 应用 transform (启用硬件加速，性能更高)
+            element.style.transform = `translate(${newTranslateX}px, ${newTranslateY}px)`;
+
+            // 6. 实时更新起始点，以实现平滑拖动
+            startX = e.clientX;
+            startY = e.clientY;
+            translateX = newTranslateX;
+            translateY = newTranslateY;
         });
 
         document.addEventListener('mouseup', () => {
             if (isDragging) {
                 isDragging = false;
                 element.classList.remove('dragging');
+                // 可选：在这里可以存储最终位置，以便下次加载时恢复
             }
         });
     }
 
+    // V9.2: 折叠/还原 逻辑
+    function toggleCollapse() {
+        const panel = document.getElementById('dy-sniffer-panel');
+        const restoreBtn = document.getElementById('dy-restore-btn');
+        state.isPanelCollapsed = !state.isPanelCollapsed;
+
+        if (state.isPanelCollapsed) {
+            panel.style.display = 'none';
+            restoreBtn.style.display = 'flex';
+        } else {
+            panel.style.display = 'flex';
+            restoreBtn.style.display = 'none';
+        }
+    }
+
     function createUI() {
         GM_addStyle(css);
+
+        // 1. 主面板
         const panel = document.createElement('div');
         panel.id = 'dy-sniffer-panel';
         panel.innerHTML = `
             <div id="dy-sniffer-header">
                 <span>🔍 视频捕获 (<span id="dy-count">0</span>)</span>
-                <div><span class="dy-clear-btn" id="dy-clear">清空</span><span style="cursor:pointer;font-size:18px;" onclick="document.getElementById('dy-sniffer-panel').style.display='none'">×</span></div>
+                <div>
+                    <span class="dy-clear-btn" id="dy-clear">清空</span>
+                    <span class="dy-close-btn" id="dy-toggle-collapse">×</span>
+                </div>
             </div>
             <div id="dy-sniffer-content"><div style="text-align:center;color:#888;padding:20px;font-size:12px;">正在监听外部视频流...</div></div>
         `;
         document.body.appendChild(panel);
+
+        // 2. 还原按钮 (折叠后显示的悬浮按钮)
+        const restoreBtn = document.createElement('button');
+        restoreBtn.id = 'dy-restore-btn';
+        restoreBtn.innerHTML = '&#8644; 还原';
+        document.body.appendChild(restoreBtn);
+
+
+        // --- 绑定事件 ---
 
         document.getElementById('dy-clear').onclick = () => {
             document.getElementById('dy-sniffer-content').innerHTML = '';
             state.items = []; state.urls.clear(); document.getElementById('dy-count').innerText = '0';
         };
 
+        // V9.2: X 按钮现在是折叠
+        document.getElementById('dy-toggle-collapse').onclick = toggleCollapse;
+
+        // V9.2: 还原按钮点击
+        restoreBtn.onclick = toggleCollapse;
+
         makeDraggable(panel, document.getElementById('dy-sniffer-header'));
     }
 
     function addVideoToUI(meta) {
+        // ... (保持 V9.2 逻辑不变) ...
         const cleanUrl = cleanAndNormalizeUrl(meta.url);
         if (!cleanUrl) return;
 
         let existingItem = state.items.find(item => item.cleanUrl === cleanUrl);
         const idDisplay = meta.id ? `ID: ${meta.id}` : 'ID: 未捕获';
+        const videoId = meta.id || extractCurrentVideoId();
 
         if (existingItem) {
+            // ... (省略去重和更新逻辑，与V9.2相同)
             let isUpdated = false;
 
             const isBetterSource = (meta.source === 'API' && existingItem.source !== 'API') ||
@@ -363,10 +479,6 @@
                     isUpdated = true;
                 }
             }
-
-            if (isUpdated) {
-                console.log(`[抖音助手] 发现重复视频，但信息已通过 ${meta.source} 更新: ${meta.title}`);
-            }
             return;
         }
 
@@ -397,14 +509,21 @@
                 </div>
                 <div class="dy-item-id">${idDisplay}</div>
                 <div class="dy-btn-group">
-                    <button class="dy-action-btn dy-btn-copy">复制</button>
+                    <button class="dy-action-btn dy-btn-jump dy-btn-disabled">跳转</button>
                     <button class="dy-action-btn dy-btn-down">下载</button>
                 </div>
             </div>
         `;
 
-        const copyBtn = itemEl.querySelector('.dy-btn-copy');
-        copyBtn.onclick = () => { GM_setClipboard(meta.url); copyBtn.innerText = "已复制"; setTimeout(() => copyBtn.innerText = "复制", 1500); };
+        const jumpBtn = itemEl.querySelector('.dy-btn-jump');
+        if (videoId) {
+            jumpBtn.classList.remove('dy-btn-disabled');
+            jumpBtn.innerText = "跳转";
+            jumpBtn.onclick = () => { window.open(`https://www.douyin.com/video/${videoId}`, '_blank'); };
+        } else {
+             jumpBtn.innerText = "ID缺失";
+        }
+
         const downBtn = itemEl.querySelector('.dy-btn-down');
         downBtn.onclick = () => forceDownload(meta.url, safeTitle + '.mp4', downBtn);
 
@@ -412,7 +531,7 @@
 
         state.urls.add(cleanUrl);
         state.items.push({
-            id: meta.id || null,
+            id: videoId || null,
             el: itemEl,
             url: meta.url,
             cleanUrl: cleanUrl,
@@ -430,7 +549,7 @@
 
     // 真正的初始化函数
     function init() {
-        // V9.0: Hook 逻辑已在顶层，此处只负责启动 DOM 依赖的服务
+        // Hook 逻辑已在顶层
 
         // 使用 MutationObserver 确保在 body 元素出现时立即启动 UI 和核心逻辑
         if (document.body) {
